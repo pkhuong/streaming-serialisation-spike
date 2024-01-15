@@ -1,9 +1,90 @@
 #include <assert.h>
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <vector>
 
 #include "framing.h"
+
+class FieldIndex
+{
+public:
+    enum class Type : uint8_t
+    {
+        // Field indices 1 to 15
+        idx1 = 0,
+        idx15 = 14,
+
+        ool_1,  // 1 byte out-of-line index
+        ool_2,
+        ool_3,
+        ool_4,
+        ool_5,
+
+        sentinel,
+    };
+
+    INLINE FieldIndex()
+        : bits_(encode(Type::sentinel, {0}, 0))
+    {
+    }
+
+    INLINE constexpr explicit FieldIndex(uint64_t index)
+    {
+        assert(index > 0);  // XXX validation
+        assert(index < (uint64_t(1) << 35));
+
+        size_t num_bits = (8 * sizeof(long long)) - __builtin_clzll(index);
+        size_t num_radix_128_digits = (num_bits + 6) / 7;
+
+        Type ool_type = Type(uint8_t(Type::ool_1) - 1 + num_radix_128_digits);
+        Type inline_type = Type(uint8_t(index - 1));
+
+        Type type = (index <= 15) ? inline_type : ool_type;
+        // TODO: pdep
+        std::array<uint8_t, 5> out_of_line_bytes = {
+            uint8_t((index >> 0) % 128),
+            uint8_t((index >> 7) % 128),
+            uint8_t((index >> 14) % 128),
+            uint8_t((index >> 21) % 128),
+            uint8_t((index >> 28) % 128),
+        };
+
+        bits_ = encode(type, out_of_line_bytes, (index <= 15) ? 0 : num_radix_128_digits);
+    }
+
+    INLINE Type get_type() const { return Type(bits_ >> 40); }
+    // Number of out-of-line radix-128 digits for the field index.
+    INLINE size_t num_radix_128_digits() const { return bits_ >> 48; }
+    // Returns a pointer to 8 bytes, the first `num_radix_128_digits()` bytes of
+    // which are the out of line index bytes.
+    //
+    // XXX: assume little endian
+    INLINE const void *get_out_of_line_bytes() const { return &bits_; }
+
+    // We always have 8 bytes to read.
+    static constexpr inline size_t out_of_line_bytes_avail = 8;
+
+private:
+    static INLINE constexpr uint64_t encode(Type type, std::array<uint8_t, 5> index, size_t num_digits)
+    {
+        uint64_t ret = 0;
+
+	// XXX: we assume little endian
+        ret = uint64_t(index[0])
+            + (uint64_t(index[1]) << 8)
+            + (uint64_t(index[2]) << 16)
+            + (uint64_t(index[3]) << 24)
+            + (uint64_t(index[4]) << 32)
+            + (uint64_t(type) << 40)
+            + (uint64_t(num_digits) << 48);
+
+        return ret;
+    }
+
+    // Store everything in a 64-bit value to make sure it's passed around in a single GPR.
+    uint64_t bits_;
+};
 
 class SubstreamFrame;
 
@@ -60,7 +141,7 @@ public:
     SubstreamFrame &operator=(SubstreamFrame &&) = default;
 
     // Returns true if the field was successfully added, false otherwise.
-    bool varlen_field(uint64_t field, bool force_last = false);
+    bool varlen_field(FieldIndex field, bool force_last = false);
     // TODO: ask for large buffer if we know the size.
     std::span<std::byte> get_buffer(ProducerContext context);
     void commit(ProducerContext context, size_t written);
@@ -121,6 +202,16 @@ private:
 class Producer
 {
 public:
+    // This implicit conversion is only available at compile-time.
+    struct ConstEvalFieldIndex
+    {
+        consteval ConstEvalFieldIndex(uint64_t index)  // NOLINT(google-explicit-constructor)
+            : field(index)
+        {}
+
+        FieldIndex field;
+    };
+
     explicit Producer(BufferProvider *provider)
         : writer_(provider)
     {}
@@ -181,7 +272,7 @@ public:
         }
     }
 
-    void varlen_field(uint64_t field, bool force_last = false)
+    void varlen_field(FieldIndex field, bool force_last = false)
     {
         assert(!substreams_.empty());
 
@@ -193,6 +284,13 @@ public:
         bool success = substreams_.back().varlen_field(field, force_last);
         (void)success;
         assert(success);
+    }
+
+    // When `field` is a compile-time constants, allow implicit
+    // conversion for convenience.
+    INLINE void varlen_field(ConstEvalFieldIndex field, bool force_last = false)
+    {
+        varlen_field(field.field, force_last);
     }
 
     INLINE std::span<std::byte> get_buffer()

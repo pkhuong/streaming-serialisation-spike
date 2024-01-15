@@ -126,7 +126,7 @@ int main()
 
         producer.close_varlen_field();
 
-        producer.varlen_field(4);
+        producer.varlen_field(400);
         write("34");
         producer.close_varlen_field();
         producer.pop_substream();

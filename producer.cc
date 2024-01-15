@@ -12,12 +12,8 @@ SubstreamFrame::Buffer::Buffer()
     data.resize(128 + 128 + 64);  // Up to 128 bytes of buffered data, plus 128 more for the new field, plus overflow bytes
 }
 
-bool SubstreamFrame::varlen_field(uint64_t field, bool force_last /* = false */)
+bool SubstreamFrame::varlen_field(FieldIndex field, bool force_last /* = false */)
 {
-    // validate inputs
-    assert(field > 0);
-    // XXX: take pre-encoded field.
-    assert(field < 16);
     assert(!closed_);
     assert(!is_in_varlen_field_);
 
@@ -34,10 +30,13 @@ bool SubstreamFrame::varlen_field(uint64_t field, bool force_last /* = false */)
     // If we're not finalized, there must be room for at least the sentinel byte.
     assert(buffer.metadata_written < max_metadata_size);
 
+    size_t num_out_of_line_bytes = field.num_radix_128_digits();
+
+    // Make sure we have room.
     {
-        size_t minimum_metadata_size = 1;  // XXX should count out of line field bytes.
+        size_t minimum_metadata_size = 1 + num_out_of_line_bytes;
         size_t metadata_space_remaining = max_metadata_size - buffer.metadata_written;
-        // We're gonna need at least one (XXX field size) byte for the metadata.
+
         if (minimum_metadata_size > metadata_space_remaining)  // can't add metadata, decline.
             return false;
 
@@ -46,10 +45,19 @@ bool SubstreamFrame::varlen_field(uint64_t field, bool force_last /* = false */)
         force_last |= (minimum_metadata_size + 2 > metadata_space_remaining);
     }
 
-    // XXX: encode more nicely.
-    uint8_t combined_byte = 128 + (field - 1) + (force_last ? 0 : 21);
+    // Cache the write index locally, in a large register.
+    size_t metadata_write_index = buffer.metadata_written;
+    memcpy(&buffer.metadata[metadata_write_index], field.get_out_of_line_bytes(),
+           FieldIndex::out_of_line_bytes_avail);
 
-    buffer.metadata[buffer.metadata_written++] = std::byte(combined_byte);
+    metadata_write_index += num_out_of_line_bytes;
+
+    // XXX: encode more nicely.
+    uint8_t combined_byte = 128  + uint8_t(field.get_type()) + (force_last ? 0 : 21);
+    buffer.metadata[metadata_write_index++] = std::byte(combined_byte);
+
+    assert(metadata_write_index <= max_metadata_size);
+    buffer.metadata_written = metadata_write_index;
 
     // New field, new size counter.
     buffer.current_field_size = 0;
