@@ -12,7 +12,7 @@ SubstreamFrame::Buffer::Buffer()
 {
     // XXX These are a bit rounder than necessary.
     metadata.resize(max_metadata_size + 8);  // Plus overflow bytes
-    data.resize(128 + 128 + 64);  // Up to 128 bytes of buffered data, plus 128 more for the new field, plus overflow bytes
+    data.resize(initial_data_capacity);
 }
 
 bool SubstreamFrame::varlen_field(FieldIndex field, bool force_last /* = false */)
@@ -254,14 +254,14 @@ void SubstreamFrame::close(ProducerContext context)
 
         assert(buffer.metadata_written <= max_metadata_size);
 
-	// metadata_write_index and buffer.metadata_written are kept in sync.
-	//
-	// Locally, prefer to use `metadata_write_index`, since it
-	// clearly doesn't overflow.
-	size_t metadata_write_index = buffer.metadata_written;
+        // metadata_write_index and buffer.metadata_written are kept in sync.
+        //
+        // Locally, prefer to use `metadata_write_index`, since it
+        // clearly doesn't overflow.
+        size_t metadata_write_index = buffer.metadata_written;
 
         // Add a sentinel if the last metadata byte isn't an implicit length terminator
-	assert(buffer.metadata_written == metadata_write_index);
+        assert(buffer.metadata_written == metadata_write_index);
 #if 0
         if (!buffer.metadata_was_finalized)
         {
@@ -269,19 +269,19 @@ void SubstreamFrame::close(ProducerContext context)
             buffer.metadata[buffer.metadata_written++] = std::byte(-108);  // XXX: constant
             assert(buffer.metadata_written <= max_metadata_size);
 
-	    metadata_write_index = buffer.metadata_written;
+            metadata_write_index = buffer.metadata_written;
         }
 #else
-	assert(buffer.metadata_was_finalized || metadata_written < max_metadata_size);
-	buffer.metadata[metadata_write_index] = std::byte(-108);  // XXX: constant
+        assert(buffer.metadata_was_finalized || metadata_write_index < max_metadata_size);
+        buffer.metadata[metadata_write_index] = std::byte(-108);  // XXX: constant
 
-	metadata_write_index += buffer.metadata_was_finalized ? 0 : 1;
+        metadata_write_index += buffer.metadata_was_finalized ? 0 : 1;
 
-	buffer.metadata_written = metadata_write_index;
+        buffer.metadata_written = metadata_write_index;
 
-	assert(buffer.metadata_written <= max_metadata_size);
+        assert(buffer.metadata_written <= max_metadata_size);
 #endif
-	assert(buffer.metadata_written == metadata_write_index);
+        assert(buffer.metadata_written == metadata_write_index);
 
         // There must be metadata
         assert(buffer.metadata_written > 0);
@@ -295,50 +295,50 @@ void SubstreamFrame::close(ProducerContext context)
         {
             SubstreamFrame *parent = &context.frames[nesting_level_ - 1];
 
-	    std::span<std::byte> dst = parent->get_buffer(context);
+            std::span<std::byte> dst = parent->get_buffer(context);
 
 #ifdef SUBSTREAM_TEST_CONSTANTS
-	    // When test constants are enabled, the magic numbers below
-	    // don't really work well.
-	    const bool simple_mode = true;
+            // When test constants are enabled, the magic numbers below
+            // don't really work well.
+            const bool simple_mode = true;
 #else
-	    const bool simple_mode = false;
+            const bool simple_mode = false;
 #endif
-	    if (LIKELY(dst.size() >= 128 && !simple_mode && total_size < 128))
-	    {
-		dst[0] = std::byte(total_size);
-		// We know we can write up to 64 bytes past the end, and
-		// the metadata buffer is preallocated with more than 128
-		// bytes.
-		assert(buffer.metadata.size() >= 128);
-		// XXX: should we go for shorter copies?
-		memcpy(&dst[1], buffer.metadata.data(), 128);
+            if (LIKELY(dst.size() >= 128 && !simple_mode && total_size < 128))
+            {
+                dst[0] = std::byte(total_size);
+                // We know we can write up to 64 bytes past the end, and
+                // the metadata buffer is preallocated with more than 128
+                // bytes.
+                assert(buffer.metadata.size() >= 128);
+                // XXX: should we go for shorter copies?
+                memcpy(&dst[1], buffer.metadata.data(), 128);
 
-		size_t dst_index = 1 + metadata_write_index;
-		assert(dst_index <= 128);
+                size_t dst_index = 1 + metadata_write_index;
+                assert(dst_index <= 128);
 
-		memcpy(&dst[dst_index], buffer.data.data(), 64);
-		dst_index += 64;
-		if (LIKELY(buffer.data_committed > 64)) // bias codegen toward doing more work
-		{
-		    memcpy(&dst[dst_index], buffer.data.data() + 64, 64);
-		    dst_index += 64;
-		}
+                memcpy(&dst[dst_index], buffer.data.data(), 64);
+                dst_index += 64;
+                if (LIKELY(buffer.data_committed > 64)) // bias codegen toward doing more work
+                {
+                    memcpy(&dst[dst_index], buffer.data.data() + 64, 64);
+                    dst_index += 64;
+                }
 
-		// We must have copied at least the header + total size.
-		assert(dst_index >= 1 + total_size);
+                // We must have copied at least the header + total size.
+                assert(dst_index >= 1 + total_size);
 
-		parent->commit(context, 1 + total_size);
-	    }
-	    else
-	    {
-		// We need the chunk size header.
-		const std::byte header[1] = { std::byte(total_size) };
+                parent->commit(context, 1 + total_size);
+            }
+            else
+            {
+                // We need the chunk size header.
+                const std::byte header[1] = { std::byte(total_size) };
 
-		parent->write(context, header);
-		parent->write(context, std::span(buffer.metadata.data(), metadata_write_index));
-		parent->write(context, std::span(buffer.data.data(), buffer.data_committed));
-	    }
+                parent->write(context, header);
+                parent->write(context, std::span(buffer.metadata.data(), metadata_write_index));
+                parent->write(context, std::span(buffer.data.data(), buffer.data_committed));
+            }
 
             buffer_.reset();
             closed_ = true;
@@ -417,4 +417,33 @@ void SubstreamFrame::switch_to_verbatim_impl(ProducerContext context)
     buffer_.reset();
 }
 
+bool SubstreamFrame::check_rep() const
+{
+    return true;
+}
+
 Producer::~Producer() = default;
+
+bool Producer::check_rep() const
+{
+    // Not all substreams have a frame, but each frame must correspond to a substream.
+    assert(writer_.get_depth() <= substreams_.size());
+
+    for (size_t idx = 0; idx < substreams_.size(); idx++)
+    {
+        const SubstreamFrame &frame = substreams_[idx];
+
+        assert(frame.check_rep());
+        assert(frame.get_nesting_level() == idx);
+
+        // A verbatim frame must have a frame
+        assert(!frame.is_verbatim() || idx < writer_.get_depth());
+        // If a frame is verbatim, its parent must be verbatim too.
+        assert(idx == 0 || !frame.is_verbatim() || substreams_[idx - 1].is_verbatim());
+        // If a frame is large, its parent must be verbatim.  This is important to
+        // bound the Producer's buffering.
+        assert(idx == 0 || !frame.is_large() || substreams_[idx - 1].is_verbatim());
+    }
+
+    return true;
+}

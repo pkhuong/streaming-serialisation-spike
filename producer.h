@@ -70,7 +70,7 @@ private:
     {
         uint64_t ret = 0;
 
-	// XXX: we assume little endian
+        // XXX: we assume little endian
         ret = uint64_t(index[0])
             + (uint64_t(index[1]) << 8)
             + (uint64_t(index[2]) << 16)
@@ -110,6 +110,9 @@ struct ProducerContext
 // are also in the same verbatim state.
 class SubstreamFrame
 {
+    // Up to 128 bytes of buffered data, plus 128 more for the new field, plus overflow bytes
+    static inline constexpr size_t initial_data_capacity = 128 + 128 + 64;
+
 #ifndef SUBSTREAM_TEST_CONSTANTS
     static inline constexpr size_t max_inline_data_size = 127;
 
@@ -165,9 +168,21 @@ public:
             switch_to_verbatim_impl(context);
     }
 
-private:
+    // Rest is only exposed for Producer::check_rep()
     INLINE bool is_verbatim() const { return !buffer_.has_value(); }
 
+    bool is_large() const
+    {
+        if (!buffer_.has_value())
+            return false;
+
+        return buffer_.value().data.size() > initial_data_capacity;
+    }
+
+    bool check_rep() const;
+    size_t get_nesting_level() const { return nesting_level_; }
+
+private:
     void switch_to_verbatim_impl(ProducerContext context);
 
     struct Buffer
@@ -175,7 +190,7 @@ private:
         // Initialises `metadata` and `data` for a "small" buffering state.
         Buffer();
 
-        std::vector<std::byte> metadata;  // Caps out at 252 + 8 bytes
+        std::vector<std::byte> metadata;  // Caps out at 252 + 8 bytes.  The extra 8 bytes allow sloppy writes.
         std::vector<std::byte> data;
 
         uint32_t data_committed = 0;
@@ -214,15 +229,20 @@ public:
 
     explicit Producer(BufferProvider *provider)
         : writer_(provider)
-    {}
+    {
+        assert(check_rep());
+    }
 
     ~Producer();
 
     void push_substream(bool separate = false)
     {
-        if (separate)
-            separate_substream();
+        assert(check_rep());
+
+        separate_substream(separate);
         substreams_.emplace_back(substreams_.size());
+
+        assert(check_rep());
     }
 
     // Forces the current substream to start a new frame; this is
@@ -230,24 +250,34 @@ public:
     // help readers skip ahead to interesting bits.
     void flush_substream()
     {
-        assert(!substreams_.empty());
+        assert(!substreams_.empty());  // XXX: usage validation
+
+        assert(check_rep());
+
         substreams_.back().close(make_context());
         substreams_.back() = SubstreamFrame(substreams_.size() - 1);
+
+        assert(check_rep());
     }
 
     void pop_substream(bool terminate = false)
     {
         assert(!substreams_.empty());
+
+        assert(check_rep());
+
         substreams_.back().close(make_context());
         substreams_.pop_back();
+        separate_substream(terminate);
 
-        if (terminate)
-            separate_substream();
+        assert(check_rep());
     }
 
     // Inserts a 0-sized substream as a separator.
     INLINE void separate_substream(bool doit = true)
     {
+        assert(check_rep());
+
         if (__builtin_constant_p(doit) && !doit)
             return;
 
@@ -270,20 +300,30 @@ public:
             dst[0] = std::byte(0);
             commit(doit ? 1 : 0);
         }
+
+        assert(check_rep());
     }
 
     void varlen_field(FieldIndex field, bool force_last = false)
     {
-        assert(!substreams_.empty());
+        assert(!substreams_.empty());  // XXX usage
 
+        assert(check_rep());
         if (substreams_.back().varlen_field(field, force_last))
+        {
+            assert(check_rep());
             return;
+        }
+
+        assert(check_rep());
 
         // SLOW_PATH.
         flush_substream();
         bool success = substreams_.back().varlen_field(field, force_last);
         (void)success;
         assert(success);
+
+        assert(check_rep());
     }
 
     // When `field` is a compile-time constants, allow implicit
@@ -297,31 +337,50 @@ public:
     // TODO: add refresh_buffer method.
     INLINE std::span<std::byte> get_buffer()
     {
-        assert(!substreams_.empty());
-        return substreams_.back().get_buffer(make_context());
+        assert(!substreams_.empty());  // XXX usage
+
+        assert(check_rep());
+        std::span<std::byte> ret = substreams_.back().get_buffer(make_context());
+
+        assert(!ret.empty());
+        assert(check_rep());
+
+        return ret;
     }
 
     INLINE void commit(size_t written)
     {
-        assert(!substreams_.empty());
-        return substreams_.back().commit(make_context(), written);
+        assert(!substreams_.empty());  // XXX usage
+
+        assert(check_rep());
+
+        substreams_.back().commit(make_context(), written);
+
+        assert(check_rep());
     }
 
     // Write to a varlen field.
     void write(std::span<const std::byte> data)
     {
-        assert(!substreams_.empty());
+        assert(!substreams_.empty());  // XXX usage
+
+        assert(check_rep());
         substreams_.back().write(make_context(), data);
+        assert(check_rep());
     }
 
     INLINE void close_varlen_field()
     {
-        assert(!substreams_.empty());
-        return substreams_.back().close_varlen_field();
+        assert(!substreams_.empty());  // XXX usage
+
+        assert(check_rep());
+        substreams_.back().close_varlen_field();
+        assert(check_rep());
     }
 
 private:
     INLINE ProducerContext make_context() { return ProducerContext{substreams_.data(), &writer_}; }
+    bool check_rep() const;
 
     std::vector<SubstreamFrame> substreams_;
     NestedFrameWriter writer_;
