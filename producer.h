@@ -293,6 +293,8 @@ public:
         varlen_field(field.field, force_last);
     }
 
+    // TODO: cache the toplevel buffer to amortise commit calls
+    // TODO: add refresh_buffer method.
     INLINE std::span<std::byte> get_buffer()
     {
         assert(!substreams_.empty());

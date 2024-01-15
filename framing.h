@@ -188,6 +188,9 @@ public:
     // `get_buffer()`, `commit()` or `close()`.
     //
     // It's always safe to write up to 64 bytes past the end of the return value.
+    //
+    // TODO: add variant that's the same except returns a std::span directly;
+    // only matters for the out of line `get_buffer_slow()` call.
     INLINE Buffer get_buffer(FrameWriterState state)
     {
         assert(check_rep());
