@@ -20,6 +20,8 @@ bool SubstreamFrame::varlen_field(FieldIndex field, bool force_last /* = false *
     assert(!closed_);
     assert(!is_in_varlen_field_);
 
+    assert(check_rep());
+
     // Can't add a field once we had a large implicit one.
     if (UNLIKELY(!buffer_.has_value()))
         return false;  // Unreachable: `!is_in_varlen_field_ && !closed_`.
@@ -67,6 +69,8 @@ bool SubstreamFrame::varlen_field(FieldIndex field, bool force_last /* = false *
     buffer.metadata_was_finalized = force_last;
 
     is_in_varlen_field_ = true;
+
+    assert(check_rep());
     return true;
 }
 
@@ -74,6 +78,8 @@ std::span<std::byte> SubstreamFrame::get_buffer(ProducerContext context)
 {
     assert(!closed_);
     assert(is_in_varlen_field_);  // XXX: validation
+
+    assert(check_rep());
 
     // in verbatim mode, we hand out large buffers, so calls should be rare
     if (UNLIKELY(is_verbatim()))
@@ -85,6 +91,8 @@ std::span<std::byte> SubstreamFrame::get_buffer(ProducerContext context)
 
         std::span<std::byte> ret = writer->get_buffer();
         assert(!ret.empty());
+
+        assert(check_rep());
         return ret;
     }
 
@@ -112,7 +120,7 @@ std::span<std::byte> SubstreamFrame::get_buffer(ProducerContext context)
 
         // If we get here, we were in a "small" buffer state and now need to be "large."
         assert(buffer.metadata_written > 0);
-        assert(buffer.data_committed >= 127);
+        assert(buffer.data_committed >= 127);  // because max_inline_data_size is low enough.
 
         // Tell the parent we're gonna be > 127 bytes for sure.
         //
@@ -131,6 +139,8 @@ std::span<std::byte> SubstreamFrame::get_buffer(ProducerContext context)
     assert(buffer.data.size() - buffer.data_committed >= span_size + 64);
     std::span<std::byte> ret(&buffer.data[buffer.data_committed], span_size);
     assert(!ret.empty());
+
+    assert(check_rep());
     return ret;
 }
 
@@ -138,6 +148,8 @@ void SubstreamFrame::commit(ProducerContext context, size_t written)
 {
     assert(!closed_);
     assert(is_in_varlen_field_);  // XXX: validation
+
+    assert(check_rep());
 
     if (UNLIKELY(is_verbatim()))  // With large spans, commit calls should be rare.
     {
@@ -169,6 +181,7 @@ void SubstreamFrame::commit(ProducerContext context, size_t written)
     if (LIKELY(written <= max_inline_data_size - buffer.current_field_size))
     {
         buffer.current_field_size += written;
+        assert(check_rep());
         return;
     }
 
@@ -180,8 +193,12 @@ void SubstreamFrame::commit(ProducerContext context, size_t written)
 
 void SubstreamFrame::write(ProducerContext context, std::span<const std::byte> field_data)
 {
+    assert(check_rep());
+
     while (!field_data.empty())
     {
+        assert(check_rep());
+
         std::span<std::byte> dst = get_buffer(context);
         assert(!dst.empty());
 
@@ -190,12 +207,18 @@ void SubstreamFrame::write(ProducerContext context, std::span<const std::byte> f
         size_t writable = (dst.size() + 63) & -64UL;
         memcpy(dst.data(), field_data.data(), std::min(writable, field_data.size()));
 
+        assert(check_rep());
+
         // But only commit what was actually available.
         size_t written = std::min(dst.size(), field_data.size());
         commit(context, written);
 
         field_data = field_data.subspan(written);
+
+        assert(check_rep());
     }
+
+    assert(check_rep());
 }
 
 void SubstreamFrame::close_varlen_field()
@@ -203,10 +226,13 @@ void SubstreamFrame::close_varlen_field()
     assert(!closed_);
     assert(is_in_varlen_field_);  // XXX: validation
 
+    assert(check_rep());
+
     if (UNLIKELY(is_verbatim()))
     {
         // Nothing to do to denote the end of the final varlen field.
         is_in_varlen_field_ = false;
+        assert(check_rep());
         return;
     }
 
@@ -241,11 +267,15 @@ void SubstreamFrame::close_varlen_field()
 
     // XXX: poison current_field_size.
     is_in_varlen_field_ = false;
+
+    assert(check_rep());
 }
 
 void SubstreamFrame::close(ProducerContext context)
 {
     assert(!closed_);
+
+    assert(check_rep());
 
     // See if we have to switch to verbatim state.
     if (LIKELY(!is_verbatim()))
@@ -311,7 +341,7 @@ void SubstreamFrame::close(ProducerContext context)
                 // the metadata buffer is preallocated with more than 128
                 // bytes.
                 assert(buffer.metadata.size() >= 128);
-                // XXX: should we go for shorter copies?
+                // XXX: should we go for shorter copies? (maybe 32 at a time?)
                 memcpy(&dst[1], buffer.metadata.data(), 128);
 
                 size_t dst_index = 1 + metadata_write_index;
@@ -349,12 +379,15 @@ void SubstreamFrame::close(ProducerContext context)
         switch_to_verbatim_impl(context);
     }
 
+    assert(check_rep());
+
     // We're (now) in verbatim mode.  Pop the nested frame.
     NestedFrameWriter *writer = context.writer;
     assert(writer->get_depth() == nesting_level_ + 1);
     writer->pop_frame();
 
     closed_ = true;
+    assert(check_rep());
 }
 
 void SubstreamFrame::switch_to_verbatim_impl(ProducerContext context)
@@ -397,9 +430,11 @@ void SubstreamFrame::switch_to_verbatim_impl(ProducerContext context)
         assert((uint8_t(terminator) - 128) / 21 == 0);
         assert(int8_t(terminator) <= -108);
 
-        // We should set `metadata_was_finalized = true`, but the
-        // whole buffer_ is about to be destroyed.
+        // only for assertions: the whole buffer is about to be destroyed.
+        buffer.metadata_was_finalized = true;
     }
+
+    assert(check_rep());
 
     // Only substream frames in verbatim state have a writer frame, and we just
     // switched to verbatim, so our child (if any) isn't.
@@ -415,10 +450,64 @@ void SubstreamFrame::switch_to_verbatim_impl(ProducerContext context)
 
     // Switch to verbatim mode.
     buffer_.reset();
+
+    assert(check_rep());
 }
 
 bool SubstreamFrame::check_rep() const
 {
+    // Can be closed and in a varlen field.
+    assert(!(closed_ && is_in_varlen_field_));
+    // Same for having buffer data.
+    assert(!(closed_ && buffer_.has_value()));
+
+    if (buffer_.has_value())
+    {
+        const Buffer &buffer = buffer_.value();
+
+        (void)buffer;
+        // Validate buffered metadata.
+
+        // It must be in range.
+        assert(buffer.metadata_written <= max_metadata_size);
+        // We allow 8 bytes of metadata sloppy writes.
+        assert(buffer.metadata_written + 8 <= buffer.metadata.size());
+
+        // If we're in a varlen field, we must have metadata for that field.
+        assert(!is_in_varlen_field_ || buffer.metadata_written > 0);
+
+        // If we're in a varlen field, the last metadata byte must be a combined metadata byte.
+        // and it must be combined metadata for a varlen field (implicit or explicit).
+        // XXX: magic numbers.
+        assert(!is_in_varlen_field_ || uint8_t(buffer.metadata[buffer.metadata_written - 1]) >= 128);
+        assert(!is_in_varlen_field_ || (uint8_t(buffer.metadata[buffer.metadata_written - 1]) - 128) / 21 <= 1);
+
+        // If we reached the max size, metadata must be finalized.
+        assert(buffer.metadata_written < max_metadata_size || buffer.metadata_was_finalized);
+
+        // Either metadata's not finalized, or we have some metadata.
+        assert(!buffer.metadata_was_finalized || buffer.metadata_written > 0);
+
+        // If we're in a varlen field and not yet finalised, we must have room for 2 more bytes (the size suffix
+        // and the terminator).
+        assert(!is_in_varlen_field_ || buffer.metadata_was_finalized || buffer.metadata_written + 2 <= max_metadata_size);
+
+        // Metadata's finalized iff the last byte is a terminator (terminators are <= 108).
+        assert(buffer.metadata_was_finalized ==
+               (buffer.metadata_written > 0 && int8_t(buffer.metadata[buffer.metadata_written - 1]) <= -108));
+
+        // If we're in a varlen field, the current field size must not exceed the max inline size:
+        // if it did, we should instead be in verbatim mode (no buffer state).
+        assert(!is_in_varlen_field_ || buffer.current_field_size <= max_inline_data_size);
+        // ... and the field data must have been committed.
+        assert(!is_in_varlen_field_ || buffer.data_committed >= buffer.current_field_size);
+
+        assert(buffer.data.size() >= 64);  // We always allow 64 bytes of sloppy data writes.
+        assert(buffer.data_committed <= buffer.data.size() - 64);
+
+        // TODO: parse metadata to confirm data size is as expected.
+    }
+
     return true;
 }
 
@@ -429,21 +518,30 @@ bool Producer::check_rep() const
     // Not all substreams have a frame, but each frame must correspond to a substream.
     assert(writer_.get_depth() <= substreams_.size());
 
+    size_t last_verbatim_idx = -1;
+    (void)last_verbatim_idx;
+
     for (size_t idx = 0; idx < substreams_.size(); idx++)
     {
-        const SubstreamFrame &frame = substreams_[idx];
+        const SubstreamFrame &substream = substreams_[idx];
 
-        assert(frame.check_rep());
-        assert(frame.get_nesting_level() == idx);
+        assert(substream.check_rep());
+        assert(substream.get_nesting_level() == idx);
 
-        // A verbatim frame must have a frame
-        assert(!frame.is_verbatim() || idx < writer_.get_depth());
-        // If a frame is verbatim, its parent must be verbatim too.
-        assert(idx == 0 || !frame.is_verbatim() || substreams_[idx - 1].is_verbatim());
-        // If a frame is large, its parent must be verbatim.  This is important to
+        // A verbatim substream must have a frame
+        assert(!substream.is_verbatim() || idx < writer_.get_depth());
+        // If a substream is verbatim, its parent must be verbatim too.
+        assert(idx == 0 || !substream.is_verbatim() || substreams_[idx - 1].is_verbatim());
+        // If a substream is large, its parent must be verbatim.  This is important to
         // bound the Producer's buffering.
-        assert(idx == 0 || !frame.is_large() || substreams_[idx - 1].is_verbatim());
+        assert(idx == 0 || !substream.is_large() || substreams_[idx - 1].is_verbatim());
+
+        if (substream.is_verbatim())
+            last_verbatim_idx = idx;
     }
+
+    // If we have verbatim substreams, the last one must be the top of the frame writer.
+    assert(last_verbatim_idx == size_t(-1) || writer_.get_depth() == last_verbatim_idx + 1);
 
     return true;
 }

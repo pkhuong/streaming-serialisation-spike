@@ -133,7 +133,9 @@ public:
     explicit SubstreamFrame(size_t nesting_level)
         : buffer_(Buffer{})
         , nesting_level_(nesting_level)
-    {}
+    {
+        assert(check_rep());
+    }
 
     ~SubstreamFrame();
 
@@ -142,6 +144,9 @@ public:
     SubstreamFrame(SubstreamFrame &&) = default;
     SubstreamFrame &operator=(const SubstreamFrame &) = delete;
     SubstreamFrame &operator=(SubstreamFrame &&) = default;
+
+    void close(ProducerContext context);
+    INLINE bool is_closed() const { return closed_; }
 
     // Returns true if the field was successfully added, false otherwise.
     bool varlen_field(FieldIndex field, bool force_last = false);
@@ -152,21 +157,6 @@ public:
     // Write to a varlen field.
     void write(ProducerContext context, std::span<const std::byte> field_data);
     void close_varlen_field();
-
-    void close(ProducerContext context);
-
-    // This is called when a nested child knows it'll exceed 127
-    // bytes, and thus its parent and all surrounding substreams will too.
-    INLINE void switch_to_verbatim(ProducerContext context)
-    {
-        assert(is_in_varlen_field_);  // XXX: input validation
-        assert(!closed_);  // more validation
-
-        assert(this == &context.frames[nesting_level_]);
-
-        if (!is_verbatim())
-            switch_to_verbatim_impl(context);
-    }
 
     // Rest is only exposed for Producer::check_rep()
     INLINE bool is_verbatim() const { return !buffer_.has_value(); }
@@ -183,6 +173,21 @@ public:
     size_t get_nesting_level() const { return nesting_level_; }
 
 private:
+    // This is called when a nested child knows it'll exceed 127
+    // bytes, and thus its parent and all surrounding substreams will too.
+    INLINE void switch_to_verbatim(ProducerContext context)
+    {
+        assert(is_in_varlen_field_);  // XXX: input validation
+        assert(!closed_);  // more validation
+
+        assert(check_rep());
+
+        if (!is_verbatim())
+            switch_to_verbatim_impl(context);
+
+        assert(check_rep());
+    }
+
     void switch_to_verbatim_impl(ProducerContext context);
 
     struct Buffer
