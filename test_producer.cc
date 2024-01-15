@@ -45,6 +45,7 @@ public:
     {
         size_t max_size = std::min(buf_.size() - 64 - write_ptr_, max_buffer_size);
 
+        (void)max_size;
         assert(count <= max_size);
         write_ptr_ += count;
     }
@@ -52,6 +53,7 @@ public:
     void fill_backrefs(std::span<const std::pair<Backref, uint8_t>> target_values) override
     {
         size_t max_size = std::min(buf_.size() - 64 - write_ptr_, max_buffer_size);
+        (void)max_size;
 
         assert(next_backref_location_ <= write_ptr_ + max_size);
         for (const auto &[backref, value] : target_values)

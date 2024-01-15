@@ -191,6 +191,7 @@ public:
         // SLOW_PATH.
         flush_substream();
         bool success = substreams_.back().varlen_field(field, force_last);
+        (void)success;
         assert(success);
     }
 
